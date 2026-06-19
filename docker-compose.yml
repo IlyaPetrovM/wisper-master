@@ -1,17 +1,34 @@
-version: '3.8'
-
 services:
+  mariadb:
+    image: mariadb:10.9
+    container_name: mediarch-mariadb
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: mediarch
+      MYSQL_USER: mediarch_user
+      MYSQL_PASSWORD: mediarch_password
+    volumes:
+      - ./storage/mariadb:/var/lib/mysql
+      - ./db_init/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - rabbit-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
   rabbitmq:
     image: rabbitmq:4.0-management-alpine
-    container_name: rabbitmq-server
+    container_name: rabbitmq-service
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - ./storage/rabbitmq:/var/lib/rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
-    ports:
-      - "5672:5672"    # AMQP port
-      - "15672:15672"  # Management UI
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
+    restart: unless-stopped
     healthcheck:
       test: rabbitmq-diagnostics -q ping
       interval: 10s
@@ -19,7 +36,6 @@ services:
       retries: 5
     networks:
       - rabbit-network
-
   master-node:
     build:
       context: .
@@ -28,20 +44,103 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+      mariadb:
+        condition: service_healthy
+      file-storage-service:
+        condition: service_started
     environment:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
       RABBITMQ_USER: guest
       RABBITMQ_PASSWORD: guest
+      MARIADB_HOST: mariadb
+      MARIADB_PORT: 3306
+      MARIADB_USER: mediarch_user
+      MARIADB_PASSWORD: mediarch_password
+      MARIADB_DATABASE: mediarch
     volumes:
-      - ./master:/app
+      - ./storage/master:/app/storage
+    ports:
+      - "8000:8000"
     networks:
       - rabbit-network
-    command: python /app/master.py
-
-volumes:
-  rabbitmq_data:
-
+  file-storage-service:
+    image: file-storage-service:0.0.1
+    container_name: file-storage-for-splitter
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./storage/file_service:/app/storage
+    environment:
+      - PORT=3001
+      - NODE_ENV=production
+      - STORAGE_PATH=/app/storage
+      - MAX_FILE_SIZE=52428800
+    restart: unless-stopped
+    networks:
+      - rabbit-network
+  audio-splitter:
+    image: audio-splitter-service:0.2.0
+    container_name: audio-splitter
+    volumes:
+      - ./storage/splitter:/shared_storage
+    privileged: true
+    restart: unless-stopped
+    depends_on:
+      - rabbitmq
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+    networks:
+      - rabbit-network
+  whisper-service-Hugo:
+    image: whisper-service:0.1.1
+    container_name: whisper-worker-Hugo
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./storage/wisper/models:/app/models
+    environment:
+      - PYTHONUNBUFFERED=1
+      # RabbitMQ конфигурация
+      - RABBIT_HOST=rabbitmq
+      - RABBIT_PORT=5672
+      - RABBIT_USER=guest
+      - RABBIT_PASSWORD=guest
+      - RABBIT_HEARTBEAT=600
+      # Названия очередей
+      - QUEUE_IN=wisper_in
+      - QUEUE_OUT=wisper_out
+      # Имя воркера
+      - WORKER_NAME=Hugo
+    restart: unless-stopped
+    networks:
+      - rabbit-network
+  whisper-service-Bobby:
+    image: whisper-service:0.1.1
+    container_name: whisper-worker-Bobby
+    ports:
+      - "8002:8000"
+    volumes:
+      - ./storage/wisper/models:/app/models
+    environment:
+      - PYTHONUNBUFFERED=1
+      # RabbitMQ конфигурация
+      - RABBIT_HOST=rabbitmq
+      - RABBIT_PORT=5672
+      - RABBIT_USER=guest
+      - RABBIT_PASSWORD=guest
+      - RABBIT_HEARTBEAT=600
+      # Названия очередей
+      - QUEUE_IN=wisper_in
+      - QUEUE_OUT=wisper_out
+      # Имя воркера
+      - WORKER_NAME=Bobby
+    restart: unless-stopped
+    networks:
+      - rabbit-network
 networks:
   rabbit-network:
     driver: bridge
