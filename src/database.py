@@ -136,6 +136,7 @@ class Database:
                     WHERE correlation_id = %s
                 """
                 cursor.execute(update_sql, (status, error_msg, correlation_id))
+                logger.info(f"Updated part {correlation_id} status to {status} with error: {error_msg}")
             elif transcript:
                 update_sql = """
                     UPDATE transcription_parts
@@ -143,6 +144,7 @@ class Database:
                     WHERE correlation_id = %s
                 """
                 cursor.execute(update_sql, (status, transcript, correlation_id))
+                logger.info(f"Updated part {correlation_id} status to {status} with transcript ({len(transcript)} chars)")
             else:
                 update_sql = """
                     UPDATE transcription_parts
@@ -150,13 +152,13 @@ class Database:
                     WHERE correlation_id = %s
                 """
                 cursor.execute(update_sql, (status, correlation_id))
+                logger.info(f"Updated part {correlation_id} status to {status}")
 
             db.commit()
             cursor.close()
             db.close()
-            logger.info(f"Updated part {correlation_id} status to {status}")
         except Exception as e:
-            logger.error(f"Error updating part status: {e}")
+            logger.error(f"Error updating part status: {e}", exc_info=True)
 
     @staticmethod
     def get_task_parts(task_id: str) -> Optional[list]:

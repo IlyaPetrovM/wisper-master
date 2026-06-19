@@ -32,6 +32,8 @@ class RabbitMQConnection:
     def __init__(self):
         self.connection = None
         self.channel = None
+        self.publish_connection = None
+        self.publish_channel = None
         self.publish_queue = queue.Queue()
 
     def connect(self):
@@ -45,9 +47,15 @@ class RabbitMQConnection:
             connection_attempts=5,
             retry_delay=2,
         )
+        # Отдельное соединение для потребления сообщений
         self.connection = pika.BlockingConnection(params)
         self.channel = self.connection.channel()
         self._declare_queues()
+
+        # Отдельное соединение для публикации сообщений (потокобезопасно)
+        self.publish_connection = pika.BlockingConnection(params)
+        self.publish_channel = self.publish_connection.channel()
+
         logger.info("Connected to RabbitMQ")
 
     def _declare_queues(self):
@@ -67,9 +75,10 @@ class RabbitMQConnection:
     def publish_transcribe_task(self, task_id: str, file_url: str, part_index: int):
         message = {
             "command": "transcribe",
+            "task_id": task_id,
             "correlation_id": f"{task_id}_{part_index}",
             "model_size": "small",
-            "format": "srt",
+            "format": "json",
             "file_url": file_url,
         }
         self.publish_queue.put(("wisper_in", message))
@@ -91,10 +100,11 @@ class RabbitMQConnection:
             try:
                 while True:
                     try:
-                        self.connection.process_data_events(time_limit=0.1)
+                        self.connection.process_data_events(time_limit=1)
                     except Exception as e:
-                        logger.error(f"Error processing data events: {e}")
-                        time.sleep(0.5)
+                        error_msg = str(e)
+                        if not any(skip in error_msg for skip in ["Timeout", "closed"]):
+                            logger.error(f"Error processing data events: {e}")
             except KeyboardInterrupt:
                 pass
 
@@ -103,7 +113,7 @@ class RabbitMQConnection:
                 while True:
                     try:
                         queue_name, message = self.publish_queue.get(timeout=1)
-                        self.channel.basic_publish(
+                        self.publish_channel.basic_publish(
                             exchange="",
                             routing_key=queue_name,
                             body=json.dumps(message),
@@ -173,6 +183,9 @@ class RabbitMQConnection:
         try:
             response = json.loads(body)
             correlation_id = response.get("correlation_id")
+            status = response.get("status")
+            logger.info(f"Transcription response received: correlation_id={correlation_id}, status={status}")
+            logger.debug(f"Full response: {json.dumps(response, ensure_ascii=False)}")
 
             part_info = Database.get_part_by_correlation_id(correlation_id)
             if not part_info:
@@ -182,23 +195,53 @@ class RabbitMQConnection:
             task_id = part_info["task_id"]
             part_index = part_info["part_index"]
             file_url = response.get("file_url", "unknown")
+            status = response.get("status", "unknown")
 
-            if response.get("success", True):
-                transcript = response.get("transcript", "")
-                Database.update_part_status(correlation_id, "completed", transcript=transcript)
-                logger.info(f"Received transcription for task {task_id} part {part_index}: {file_url}")
-
-                self._save_transcription_to_marks(task_id, part_index, transcript)
-            else:
+            if status == "error":
                 error_msg = response.get("error", "Unknown error")
+                worker_id = response.get("worker_id", "unknown")
+                logs = response.get("logs", [])
+
+                # Логируем информацию об ошибке с деталями
+                logger.error(f"Transcription failed for task {task_id} part {part_index} ({file_url}) from {worker_id}: {error_msg}")
+
+                # Логируем логи воркера если они есть
+                if logs:
+                    logger.error(f"Worker logs for {correlation_id}:")
+                    for log_line in logs:
+                        logger.error(f"  {log_line}")
+
                 Database.update_part_status(correlation_id, "error", error_msg=error_msg)
-                logger.error(f"Transcription failed for task {task_id} part {part_index} ({file_url}): {error_msg}")
+            elif status == "success":
+                # Получаем результат - это может быть JSON массив или SRT строка
+                result = response.get("result", [])
+                worker_id = response.get("worker_id", "unknown")
+                filename = response.get("filename", "unknown")
+
+                if not result:
+                    logger.warning(f"Empty result for task {task_id} part {part_index} from {worker_id}")
+                    Database.update_part_status(correlation_id, "completed", transcript="")
+                else:
+                    result_size = len(result) if isinstance(result, list) else len(result) if isinstance(result, str) else 0
+                    logger.info(f"Received transcription for task {task_id} part {part_index} from {worker_id}: {filename} ({result_size} {'segments' if isinstance(result, list) else 'chars'})")
+
+                    # Сохраняем результат как JSON строка в БД
+                    if isinstance(result, list):
+                        transcript = json.dumps(result, ensure_ascii=False)
+                    else:
+                        transcript = result
+
+                    Database.update_part_status(correlation_id, "completed", transcript=transcript)
+                    self._save_transcription_to_marks(task_id, part_index, transcript)
+            else:
+                logger.warning(f"Unknown status for task {task_id} part {part_index}: {status}")
+                Database.update_part_status(correlation_id, "error", error_msg=f"Unknown status: {status}")
 
             self._check_task_completion(task_id)
         except Exception as e:
-            logger.error(f"Error handling transcription response: {e}")
+            logger.error(f"Error handling transcription response: {e}", exc_info=True)
 
-    def _save_transcription_to_marks(self, task_id: str, part_index: int, transcript_srt: str):
+    def _save_transcription_to_marks(self, task_id: str, part_index: int, transcript_data: str):
         try:
             task_info = Database.get_task_info(task_id)
             if not task_info:
@@ -208,10 +251,19 @@ class RabbitMQConnection:
             file_id = task_info["file_id"]
             offset_ms = part_index * 60 * 1000
 
-            subtitles = self._parse_srt(transcript_srt)
+            logger.debug(f"Parsing transcript for task {task_id} part {part_index}, data length: {len(transcript_data)}")
+            subtitles = self._parse_transcript_json(transcript_data)
+            logger.info(f"Parsed {len(subtitles)} segments from transcript (task {task_id} part {part_index})")
+
+            if not subtitles:
+                logger.warning(f"No segments parsed from transcript for task {task_id} part {part_index}")
+                return
 
             db = pymysql.connect(**DB_CONFIG)
             cursor = db.cursor()
+
+            inserted_count = 0
+            updated_count = 0
 
             for subtitle in subtitles:
                 start_ms = subtitle["start_ms"] + offset_ms
@@ -225,6 +277,7 @@ class RabbitMQConnection:
                     update_sql = "UPDATE marks SET describtion = %s WHERE file_id = %s AND time_msec = %s"
                     new_desc = f"{result[0]} {subtitle['text']}"
                     cursor.execute(update_sql, (new_desc, file_id, start_ms))
+                    updated_count += 1
                 else:
                     insert_sql = """
                         INSERT INTO marks (file_id, time_msec, start_time, describtion)
@@ -234,13 +287,14 @@ class RabbitMQConnection:
                         insert_sql,
                         (file_id, start_ms, start_time, subtitle["text"]),
                     )
+                    inserted_count += 1
 
             db.commit()
             cursor.close()
             db.close()
-            logger.info(f"Saved transcription for task {task_id} part {part_index} to marks")
+            logger.info(f"Saved transcription for task {task_id} part {part_index} to marks: {inserted_count} inserted, {updated_count} updated")
         except Exception as e:
-            logger.error(f"Error saving transcription to marks: {e}")
+            logger.error(f"Error saving transcription to marks: {e}", exc_info=True)
 
     def _check_task_completion(self, task_id: str):
         try:
@@ -267,7 +321,54 @@ class RabbitMQConnection:
             logger.error(f"Error checking task completion: {e}")
 
 
+    def _parse_transcript_json(self, json_data: str) -> List[Dict]:
+        """Парсит транскрипт в JSON формате от whisper-service
+
+        Ожидается JSON массив с объектами:
+        [
+            {"id": 0, "start": 0.0, "end": 3.5, "text": "Текст"},
+            {"id": 1, "start": 3.5, "end": 7.2, "text": "Текст"}
+        ]
+        """
+        subtitles = []
+        try:
+            data = json.loads(json_data)
+
+            # Если это массив объектов (формат JSON от whisper-service)
+            if isinstance(data, list):
+                for segment in data:
+                    if isinstance(segment, dict):
+                        start_ms = int(float(segment.get("start", 0)) * 1000)
+                        text = segment.get("text", "").strip()
+
+                        if text:
+                            subtitles.append({"start_ms": start_ms, "text": text})
+
+            # Если это объект с полями segments
+            elif isinstance(data, dict):
+                if "segments" in data:
+                    for segment in data["segments"]:
+                        start_ms = int(float(segment.get("start", 0)) * 1000)
+                        text = segment.get("text", "").strip()
+
+                        if text:
+                            subtitles.append({"start_ms": start_ms, "text": text})
+
+                # Если есть просто поле text (полная транскрипция)
+                elif "text" in data:
+                    text = data.get("text", "").strip()
+                    if text:
+                        subtitles.append({"start_ms": 0, "text": text})
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing transcript JSON: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error parsing transcript: {e}")
+
+        return subtitles
+
     def _parse_srt(self, srt_content: str) -> List[Dict]:
+        """Парсит SRT формат (оставлено для обратной совместимости)"""
         subtitles = []
         blocks = srt_content.strip().split("\n\n")
 

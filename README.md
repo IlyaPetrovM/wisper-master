@@ -43,7 +43,7 @@ FastAPI микросервис для нарезания аудио файлов
 ```json
 {
   "task_id": "task_uuid",
-  "url": "http://file-storage-service:3001/api/files/audio.mp3",
+  "url": "http://file-storage-service:3001/api/files/audio_short.mp3",
   "max_duration": 60,
   "save_to_storage": true
 }
