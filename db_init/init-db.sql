@@ -102,6 +102,8 @@ CREATE TABLE IF NOT EXISTS `marks` (
   `recognition0` text DEFAULT NULL,
   `recognition1` text DEFAULT NULL,
   `recognition2` text DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
   KEY `file_id` (`file_id`) USING BTREE,
   KEY `start_time` (`start_time`),
@@ -127,14 +129,17 @@ CREATE TABLE IF NOT EXISTS `photo_marks` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `transcribtion_tasks` (
-  `task_id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL,
   `file_id` int(11) NOT NULL,
-  `url` text COLLATE utf8mb4_unicode_ci NOT NULL,
-  `splitted_file_id` varchar(36) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `task_id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL,
   `status` varchar(20) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'pending',
-  `error_message` text COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `created_at` timestamp NULL DEFAULT current_timestamp(),
   `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  `model_size` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT 'small' COMMENT 'whisper model size: tiny, base, small, medium, large',
+  `url` text COLLATE utf8mb4_unicode_ci NOT NULL,
+  `splitted_file_id` varchar(36) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `format` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT 'json' COMMENT 'output format: json, srt, vtt, txt',
+  `min_mark_duration_ms` int(11) DEFAULT 60000 COMMENT 'minimum duration in ms for grouping transcription segments into marks',
+  `error_message` text COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   PRIMARY KEY (`task_id`),
   KEY `idx_file_id` (`file_id`),
   KEY `idx_status` (`status`),
@@ -142,24 +147,49 @@ CREATE TABLE IF NOT EXISTS `transcribtion_tasks` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `transcription_parts` (
-  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `filename` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `task_id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `status` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT 'pending' COMMENT 'pending, processing, completed, error',
+  `worker_id` varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `part_index` int(11) NOT NULL,
+  `duration_msec` int(11) DEFAULT 0 COMMENT 'длительность фрагмента в миллисекундах',
+  `offset_ms` int(11) DEFAULT 0 COMMENT 'смещение начала фрагмента в исходном файле (сумма длительности предыдущих частей)',
   `file_path` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
   `file_url` text COLLATE utf8mb4_unicode_ci,
   `correlation_id` varchar(100) COLLATE utf8mb4_unicode_ci NOT NULL UNIQUE,
-  `duration_msec` int(11) DEFAULT 0 COMMENT 'длительность фрагмента в миллисекундах',
-  `offset_ms` int(11) DEFAULT 0 COMMENT 'смещение начала фрагмента в исходном файле (сумма длительности предыдущих частей)',
-  `status` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT 'pending' COMMENT 'pending, processing, completed, error',
-  `transcript` longtext COLLATE utf8mb4_unicode_ci,
   `error_message` text COLLATE utf8mb4_unicode_ci,
   `created_at` timestamp NULL DEFAULT current_timestamp(),
   `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  `id` int(11) NOT NULL AUTO_INCREMENT,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_correlation_id` (`correlation_id`),
   KEY `idx_task_id` (`task_id`),
   KEY `idx_status` (`status`),
   CONSTRAINT `fk_transcription_parts_task` FOREIGN KEY (`task_id`) REFERENCES `transcribtion_tasks` (`task_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `transcription_results` (
+  `file_id` int(11) NOT NULL,
+  `offset_ms` int(11) DEFAULT 0 COMMENT 'смещение начала фрагмента в исходном файле (сумма длительности предыдущих частей)',
+  `start` int(11) DEFAULT 0 COMMENT 'начало сегмента в миллисекундах',
+  `end` int(11) DEFAULT 0 COMMENT 'конец сегмента в миллисекундах',
+  `text` longtext COLLATE utf8mb4_unicode_ci NOT NULL,
+  `task_id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `correlation_id` varchar(100) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `segment_id` int(11) NOT NULL COMMENT 'ID сегмента в результатах',
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `avg_logprob` float DEFAULT NULL,
+  `compression_ratio` float DEFAULT NULL,
+  `no_speech_prob` float DEFAULT NULL,
+  `filename` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  PRIMARY KEY (`id`),
+  KEY `idx_task_id` (`task_id`),
+  KEY `idx_file_id` (`file_id`),
+  KEY `idx_correlation_id` (`correlation_id`),
+  CONSTRAINT `fk_results_task` FOREIGN KEY (`task_id`) REFERENCES `transcribtion_tasks` (`task_id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_results_correlation` FOREIGN KEY (`correlation_id`) REFERENCES `transcription_parts` (`correlation_id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_results_file` FOREIGN KEY (`file_id`) REFERENCES `files` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 DELIMITER //
@@ -194,11 +224,6 @@ END//
 DELIMITER ;
 SET SQL_MODE=@OLDTMP_SQL_MODE;
 
-/*!40101 SET SQL_MODE=IFNULL(@OLD_SQL_MODE, '') */;
-/*!40014 SET FOREIGN_KEY_CHECKS=IFNULL(@OLD_FOREIGN_KEY_CHECKS, 1) */;
-/*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
-/*!40111 SET SQL_NOTES=IFNULL(@OLD_SQL_NOTES, 1) */;
-
 
 -- 1. Вставляем событие (опционально)
 INSERT INTO `events` (`title`, `user_created`)
@@ -226,4 +251,13 @@ INSERT INTO `files` (
   'test_user',
   'ready'
 );
+
+
+
+
+/*!40101 SET SQL_MODE=IFNULL(@OLD_SQL_MODE, '') */;
+/*!40014 SET FOREIGN_KEY_CHECKS=IFNULL(@OLD_FOREIGN_KEY_CHECKS, 1) */;
+/*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
+/*!40111 SET SQL_NOTES=IFNULL(@OLD_SQL_NOTES, 1) */;
+
 

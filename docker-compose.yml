@@ -1,4 +1,32 @@
 services:
+  master-wisper:
+    build:
+      context: .
+    container_name: master-wisper
+    image: master-wisper:0.1.0
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mariadb:
+        condition: service_healthy
+      file-storage-service:
+        condition: service_started
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      MARIADB_HOST: mariadb
+      MARIADB_PORT: 3306
+      MARIADB_USER: mediarch_user
+      MARIADB_PASSWORD: mediarch_password
+      MARIADB_DATABASE: mediarch
+    volumes:
+      - ./storage/master:/app/storage
+    ports:
+      - "8000:8000"
+    networks:
+      - rabbit-network
   mariadb:
     image: mariadb:10.9
     container_name: mediarch-mariadb
@@ -37,34 +65,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - rabbit-network
-  master-node:
-    build:
-      context: .
-      dockerfile: Dockerfile.master
-    container_name: master-node
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      mariadb:
-        condition: service_healthy
-      file-storage-service:
-        condition: service_started
-    environment:
-      RABBITMQ_HOST: rabbitmq
-      RABBITMQ_PORT: 5672
-      RABBITMQ_USER: guest
-      RABBITMQ_PASSWORD: guest
-      MARIADB_HOST: mariadb
-      MARIADB_PORT: 3306
-      MARIADB_USER: mediarch_user
-      MARIADB_PASSWORD: mediarch_password
-      MARIADB_DATABASE: mediarch
-    volumes:
-      - ./storage/master:/app/storage
-    ports:
-      - "8000:8000"
     networks:
       - rabbit-network
   file-storage-service:

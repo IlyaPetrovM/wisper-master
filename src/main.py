@@ -26,11 +26,15 @@ def startup_event():
         task_id = task_info["task_id"]
         logger.info(f"Recovering task {task_id}")
 
+        full_task_info = Database.get_task_info(task_id)
+        model_size = full_task_info.get("model_size", "small") if full_task_info else "small"
+        format_type = full_task_info.get("format", "json") if full_task_info else "json"
+
         parts = Database.get_task_parts(task_id)
         for part in parts:
             if part["status"] in ("pending", "processing"):
                 logger.info(f"  Republishing part {part['part_index']} (correlation_id: {part['correlation_id']})")
-                rmq.publish_transcribe_task(task_id, part["file_url"], part["part_index"])
+                rmq.publish_transcribe_task(task_id, part["file_url"], part["part_index"], model_size, format_type)
 
     rmq.start_consuming()
 
@@ -39,7 +43,7 @@ def startup_event():
 def start_transcription(request: TranscribeRequest):
     try:
         task_id = str(uuid.uuid4())
-        Database.create_task(request.file_id, request.url, task_id)
+        Database.create_task(request.file_id, request.url, task_id, request.model_size, request.format, request.min_mark_duration_ms)
         rmq.publish_split_task(task_id, request.url, request.max_duration)
         return {"task_id": task_id, "status": "started"}
     except Exception as e:

@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from typing import Optional
@@ -17,21 +18,21 @@ DB_CONFIG = {
 
 class Database:
     @staticmethod
-    def create_task(file_id: str, url: str, task_id: str):
+    def create_task(file_id: str, url: str, task_id: str, model_size: str = "small", format: str = "json", min_mark_duration_ms: int = 60000):
         try:
             db = pymysql.connect(**DB_CONFIG)
             cursor = db.cursor()
 
             insert_sql = """
-                INSERT INTO transcribtion_tasks (task_id, file_id, url, status, created_at)
-                VALUES (%s, %s, %s, 'pending', NOW())
+                INSERT INTO transcribtion_tasks (task_id, file_id, url, model_size, format, min_mark_duration_ms, status, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, 'pending', NOW())
             """
 
-            cursor.execute(insert_sql, (task_id, file_id, url))
+            cursor.execute(insert_sql, (task_id, file_id, url, model_size, format, min_mark_duration_ms))
             db.commit()
             cursor.close()
             db.close()
-            logger.info(f"Created task {task_id}")
+            logger.info(f"Created task {task_id} (model_size: {model_size}, format: {format}, min_mark_duration_ms: {min_mark_duration_ms})")
         except Exception as e:
             logger.error(f"Error creating task: {e}")
             raise
@@ -124,7 +125,7 @@ class Database:
 
     @staticmethod
     def update_part_status(correlation_id: str, status: str, transcript: str = None,
-                          error_msg: str = None):
+                          error_msg: str = None, worker_id: str = None, filename: str = None, file_id: str = None, offset_ms: int = 0):
         try:
             db = pymysql.connect(**DB_CONFIG)
             cursor = db.cursor()
@@ -132,26 +133,76 @@ class Database:
             if error_msg:
                 update_sql = """
                     UPDATE transcription_parts
-                    SET status = %s, error_message = %s
+                    SET status = %s, error_message = %s, worker_id = %s, filename = %s
                     WHERE correlation_id = %s
                 """
-                cursor.execute(update_sql, (status, error_msg, correlation_id))
+                cursor.execute(update_sql, (status, error_msg, worker_id, filename, correlation_id))
                 logger.info(f"Updated part {correlation_id} status to {status} with error: {error_msg}")
             elif transcript:
-                update_sql = """
-                    UPDATE transcription_parts
-                    SET status = %s, transcript = %s
-                    WHERE correlation_id = %s
-                """
-                cursor.execute(update_sql, (status, transcript, correlation_id))
-                logger.info(f"Updated part {correlation_id} status to {status} with transcript ({len(transcript)} chars)")
+                cursor.execute(
+                    "SELECT task_id, offset_ms FROM transcription_parts WHERE correlation_id = %s",
+                    (correlation_id,)
+                )
+                result = cursor.fetchone()
+                if result:
+                    task_id = result[0]
+                    offset_ms = result[1]  # Получаем offset_ms из таблицы части
+                    update_sql = """
+                        UPDATE transcription_parts
+                        SET status = %s, worker_id = %s, filename = %s
+                        WHERE correlation_id = %s
+                    """
+                    cursor.execute(update_sql, (status, worker_id, filename, correlation_id))
+
+                    # Get file_id from task if not provided
+                    if not file_id:
+                        cursor.execute(
+                            "SELECT file_id FROM transcribtion_tasks WHERE task_id = %s",
+                            (task_id,)
+                        )
+                        file_result = cursor.fetchone()
+                        if file_result:
+                            file_id = file_result[0]
+
+                    try:
+                        segments = json.loads(transcript)
+                        if not isinstance(segments, list):
+                            segments = [segments]
+                    except:
+                        segments = []
+
+                    for segment in segments:
+                        # Конвертируем start и end из секунд в миллисекунды
+                        start_ms = int(float(segment.get("start", 0)) * 1000)
+                        end_ms = int(float(segment.get("end", 0)) * 1000)
+
+                        insert_sql = """
+                            INSERT INTO transcription_results
+                            (task_id, file_id, correlation_id, segment_id, start, end, offset_ms, text, avg_logprob, compression_ratio, no_speech_prob, filename)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """
+                        cursor.execute(insert_sql, (
+                            task_id,
+                            file_id,
+                            correlation_id,
+                            segment.get("id", 0),
+                            start_ms,
+                            end_ms,
+                            offset_ms,
+                            segment.get("text", ""),
+                            segment.get("avg_logprob"),
+                            segment.get("compression_ratio"),
+                            segment.get("no_speech_prob"),
+                            filename
+                        ))
+                    logger.info(f"Updated part {correlation_id} status to {status} with {len(segments)} segments")
             else:
                 update_sql = """
                     UPDATE transcription_parts
-                    SET status = %s
+                    SET status = %s, worker_id = %s, filename = %s
                     WHERE correlation_id = %s
                 """
-                cursor.execute(update_sql, (status, correlation_id))
+                cursor.execute(update_sql, (status, worker_id, filename, correlation_id))
                 logger.info(f"Updated part {correlation_id} status to {status}")
 
             db.commit()
@@ -167,7 +218,7 @@ class Database:
             cursor = db.cursor()
 
             cursor.execute("""
-                SELECT part_index, file_path, file_url, correlation_id, status, transcript, duration_msec, offset_ms
+                SELECT part_index, file_path, file_url, correlation_id, status, duration_msec, offset_ms
                 FROM transcription_parts
                 WHERE task_id = %s
                 ORDER BY part_index
@@ -185,9 +236,8 @@ class Database:
                         "file_url": r[2],
                         "correlation_id": r[3],
                         "status": r[4],
-                        "transcript": r[5],
-                        "duration_msec": r[6],
-                        "offset_ms": r[7]
+                        "duration_msec": r[5],
+                        "offset_ms": r[6]
                     }
                     for r in results
                 ]
@@ -234,7 +284,7 @@ class Database:
             cursor = db.cursor()
 
             cursor.execute("""
-                SELECT task_id, part_index, file_path, file_url, status, transcript, duration_msec, offset_ms
+                SELECT task_id, part_index, file_path, file_url, status, duration_msec, offset_ms, worker_id, filename
                 FROM transcription_parts
                 WHERE correlation_id = %s
             """, (correlation_id,))
@@ -250,9 +300,10 @@ class Database:
                     "file_path": result[2],
                     "file_url": result[3],
                     "status": result[4],
-                    "transcript": result[5],
-                    "duration_msec": result[6],
-                    "offset_ms": result[7]
+                    "duration_msec": result[5],
+                    "offset_ms": result[6],
+                    "worker_id": result[7],
+                    "filename": result[8]
                 }
             return None
         except Exception as e:
@@ -266,7 +317,7 @@ class Database:
             cursor = db.cursor()
 
             cursor.execute("""
-                SELECT task_id, file_id, url, status
+                SELECT task_id, file_id, url, status, model_size, format, min_mark_duration_ms
                 FROM transcribtion_tasks
                 WHERE task_id = %s
             """, (task_id,))
@@ -280,9 +331,107 @@ class Database:
                     "task_id": result[0],
                     "file_id": result[1],
                     "url": result[2],
-                    "status": result[3]
+                    "status": result[3],
+                    "model_size": result[4],
+                    "format": result[5],
+                    "min_mark_duration_ms": result[6] if result[6] else 60000
                 }
             return None
         except Exception as e:
             logger.error(f"Error getting task info: {e}")
             return None
+
+    @staticmethod
+    def get_transcription_result(correlation_id: str) -> Optional[dict]:
+        try:
+            db = pymysql.connect(**DB_CONFIG)
+            cursor = db.cursor()
+
+            cursor.execute("""
+                SELECT file_id, filename, segment_id, start, end, offset_ms, text, avg_logprob, compression_ratio, no_speech_prob, created_at
+                FROM transcription_results
+                WHERE correlation_id = %s
+                ORDER BY segment_id
+            """, (correlation_id,))
+
+            results = cursor.fetchall()
+            cursor.close()
+            db.close()
+
+            if results:
+                return {
+                    "correlation_id": correlation_id,
+                    "file_id": results[0][0],
+                    "filename": results[0][1],
+                    "segments": [
+                        {
+                            "id": r[2],
+                            "start": r[3],
+                            "end": r[4],
+                            "offset_ms": r[5],
+                            "text": r[6],
+                            "avg_logprob": r[7],
+                            "compression_ratio": r[8],
+                            "no_speech_prob": r[9],
+                            "created_at": r[10]
+                        }
+                        for r in results
+                    ]
+                }
+            return None
+        except Exception as e:
+            logger.error(f"Error getting transcription result: {e}")
+            return None
+
+    @staticmethod
+    def get_task_results(task_id: str) -> Optional[list]:
+        try:
+            db = pymysql.connect(**DB_CONFIG)
+            cursor = db.cursor()
+
+            cursor.execute("""
+                SELECT DISTINCT correlation_id, file_id, filename
+                FROM transcription_results
+                WHERE task_id = %s
+                ORDER BY correlation_id
+            """, (task_id,))
+
+            correlations = cursor.fetchall()
+            results = []
+
+            for (correlation_id, file_id, filename) in correlations:
+                cursor.execute("""
+                    SELECT segment_id, start, end, offset_ms, text, avg_logprob, compression_ratio, no_speech_prob, created_at
+                    FROM transcription_results
+                    WHERE correlation_id = %s
+                    ORDER BY segment_id
+                """, (correlation_id,))
+
+                segments = cursor.fetchall()
+                if segments:
+                    results.append({
+                        "correlation_id": correlation_id,
+                        "file_id": file_id,
+                        "filename": filename,
+                        "segments": [
+                            {
+                                "id": s[0],
+                                "start": s[1],
+                                "end": s[2],
+                                "offset_ms": s[3],
+                                "text": s[4],
+                                "avg_logprob": s[5],
+                                "compression_ratio": s[6],
+                                "no_speech_prob": s[7],
+                                "created_at": s[8]
+                            }
+                            for s in segments
+                        ]
+                    })
+
+            cursor.close()
+            db.close()
+            return results
+        except Exception as e:
+            logger.error(f"Error getting task results: {e}")
+            return []
