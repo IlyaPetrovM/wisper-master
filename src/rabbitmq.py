@@ -35,6 +35,7 @@ class RabbitMQConnection:
         self.publish_connection = None
         self.publish_channel = None
         self.publish_queue = queue.Queue()
+        self.wisper_tasks_pending = {}  # Отслеживание кол-ва сообщений wisper_in для каждого task_id
 
     def connect(self):
         credentials = pika.PlainCredentials(
@@ -46,13 +47,15 @@ class RabbitMQConnection:
             credentials=credentials,
             connection_attempts=5,
             retry_delay=2,
+            heartbeat=600,
+            blocked_connection_timeout=300,
         )
         # Отдельное соединение для потребления сообщений
         self.connection = pika.BlockingConnection(params)
         self.channel = self.connection.channel()
         self._declare_queues()
 
-        # Отдельное соединение для публикации сообщений (потокобезопасно)
+        # Отдельное соединение для публикации сообщений
         self.publish_connection = pika.BlockingConnection(params)
         self.publish_channel = self.publish_connection.channel()
 
@@ -72,17 +75,20 @@ class RabbitMQConnection:
         self.publish_queue.put(("split_in", message))
         logger.info(f"Queued split task {task_id}")
 
-    def publish_transcribe_task(self, task_id: str, file_url: str, part_index: int):
+    def publish_transcribe_task(self, task_id: str, file_url: str, part_index: int, model_size: str = "small", format: str = "json"):
         message = {
             "command": "transcribe",
             "task_id": task_id,
             "correlation_id": f"{task_id}_{part_index}",
-            "model_size": "small",
-            "format": "json",
+            "model_size": model_size,
+            "format": format,
             "file_url": file_url,
         }
         self.publish_queue.put(("wisper_in", message))
-        logger.info(f"Queued transcribe task for {file_url}")
+        if task_id not in self.wisper_tasks_pending:
+            self.wisper_tasks_pending[task_id] = 0
+        self.wisper_tasks_pending[task_id] += 1
+        logger.info(f"Queued transcribe task for {file_url} (model_size: {model_size}, format: {format})")
 
     def start_consuming(self):
         self.channel.basic_consume(
@@ -120,6 +126,20 @@ class RabbitMQConnection:
                             properties=pika.BasicProperties(delivery_mode=2),
                         )
                         logger.info(f"Published message to {queue_name}")
+
+                        # Update part status to transcribing when publishing to wisper_in
+                        if queue_name == QUEUE_WISPER_IN and "correlation_id" in message:
+                            correlation_id = message.get("correlation_id")
+                            Database.update_part_status(correlation_id, "transcribing")
+
+                            # Check if all wisper_in messages for this task have been published
+                            task_id = message.get("task_id")
+                            if task_id in self.wisper_tasks_pending:
+                                self.wisper_tasks_pending[task_id] -= 1
+                                if self.wisper_tasks_pending[task_id] == 0:
+                                    Database.update_task_status(task_id, "transcribing")
+                                    logger.info(f"All transcribe tasks for {task_id} have been published, status changed to transcribing")
+                                    del self.wisper_tasks_pending[task_id]
                     except queue.Empty:
                         pass
                     except Exception as e:
@@ -158,6 +178,8 @@ class RabbitMQConnection:
                 logger.info(f"Split response for task {task_id}: {len(files)} files received")
 
                 offset_ms = 0
+                model_size = task_info.get("model_size", "small")
+                format_type = task_info.get("format", "json")
                 for idx, file_info in enumerate(files):
                     file_path = file_info.get("path")
                     file_url = f"http://file-storage-service:3001/api/files/{file_path}" if response.get("storage_files") else file_path
@@ -169,7 +191,7 @@ class RabbitMQConnection:
                     )
                     logger.info(f"  Saved part {idx}: {file_path} (correlation_id: {correlation_id}, offset: {offset_ms}ms, duration: {duration_msec}ms)")
 
-                    self.publish_transcribe_task(task_id, file_url, idx)
+                    self.publish_transcribe_task(task_id, file_url, idx, model_size, format_type)
                     offset_ms += duration_msec
 
                 Database.update_split_task(task_id, splitted_file_id, "splitting")
@@ -211,6 +233,7 @@ class RabbitMQConnection:
             if status == "error":
                 error_msg = response.get("error", "Unknown error")
                 worker_id = response.get("worker_id", "unknown")
+                filename = response.get("filename", "unknown")
                 logs = response.get("logs", [])
 
                 # Логируем информацию об ошибке с деталями
@@ -222,16 +245,20 @@ class RabbitMQConnection:
                     for log_line in logs:
                         logger.error(f"  {log_line}")
 
-                Database.update_part_status(correlation_id, "error", error_msg=error_msg)
+                Database.update_part_status(correlation_id, "error", error_msg=error_msg, worker_id=worker_id, filename=filename)
             elif status == "success":
                 # Получаем результат - это может быть JSON массив или SRT строка
                 result = response.get("result", [])
                 worker_id = response.get("worker_id", "unknown")
                 filename = response.get("filename", "unknown")
 
+                # Получаем file_id из информации о задаче
+                task_info = Database.get_task_info(task_id)
+                file_id = task_info.get("file_id") if task_info else None
+
                 if not result:
                     logger.warning(f"Empty result for task {task_id} part {part_index} from {worker_id}")
-                    Database.update_part_status(correlation_id, "completed", transcript="")
+                    Database.update_part_status(correlation_id, "completed", transcript="", worker_id=worker_id, filename=filename, file_id=file_id)
                 else:
                     result_size = len(result) if isinstance(result, list) else len(result) if isinstance(result, str) else 0
                     logger.info(f"Received transcription for task {task_id} part {part_index} from {worker_id}: {filename} ({result_size} {'segments' if isinstance(result, list) else 'chars'})")
@@ -242,11 +269,13 @@ class RabbitMQConnection:
                     else:
                         transcript = result
 
-                    Database.update_part_status(correlation_id, "completed", transcript=transcript)
+                    Database.update_part_status(correlation_id, "completed", transcript=transcript, worker_id=worker_id, filename=filename, file_id=file_id)
                     self._save_transcription_to_marks(task_id, part_index, transcript)
             else:
                 logger.warning(f"Unknown status for task {task_id} part {part_index}: {status}")
-                Database.update_part_status(correlation_id, "error", error_msg=f"Unknown status: {status}")
+                worker_id = response.get("worker_id", "unknown")
+                filename = response.get("filename", "unknown")
+                Database.update_part_status(correlation_id, "error", error_msg=f"Unknown status: {status}", worker_id=worker_id, filename=filename)
 
             self._check_task_completion(task_id)
         except Exception as e:
@@ -285,15 +314,28 @@ class RabbitMQConnection:
                 start_ms = subtitle["start_ms"] + offset_ms
                 start_time = self._format_time(start_ms)
 
-                check_sql = "SELECT describtion FROM marks WHERE file_id = %s AND time_msec = %s"
+                check_sql = "SELECT describtion, hide FROM marks WHERE file_id = %s AND time_msec = %s"
                 cursor.execute(check_sql, (file_id, start_ms))
                 result = cursor.fetchone()
 
                 if result:
-                    update_sql = "UPDATE marks SET describtion = %s WHERE file_id = %s AND time_msec = %s"
-                    new_desc = f"{result[0]} {subtitle['text']}"
-                    cursor.execute(update_sql, (new_desc, file_id, start_ms))
-                    updated_count += 1
+                    describtion, hide = result[0], result[1]
+                    # Если запись скрыта (hide не пусто), то добавляем новую вместо обновления
+                    if hide is not None and str(hide) == '1':
+                        insert_sql = """
+                            INSERT INTO marks (file_id, time_msec, start_time, describtion)
+                            VALUES (%s, %s, %s, %s)
+                        """
+                        cursor.execute(
+                            insert_sql,
+                            (file_id, start_ms, start_time, subtitle["text"]),
+                        )
+                        inserted_count += 1
+                        logger.debug(f"Added new record for file_id={file_id}, time_msec={start_ms} - existing record is hidden")
+                    else:
+                        # Если запись не скрыта оставляем как есть
+                        logger.debug(f"Pass record for file_id={file_id}, time_msec={start_ms} - record exists ")
+                        updated_count += 1
                 else:
                     insert_sql = """
                         INSERT INTO marks (file_id, time_msec, start_time, describtion)

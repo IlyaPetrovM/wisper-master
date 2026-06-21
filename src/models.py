@@ -8,6 +8,8 @@ class TranscribeRequest(BaseModel):
     file_id: int
     url: str
     max_duration: int = 60
+    model_size: str = "small"
+    format: str = "json"
 
 
 @dataclass

@@ -16,6 +16,57 @@
 5. wisper workers возвращают транскрипции файлов в очередь wisper_out
 6. master собирает все транскрипции в единый json (при этом меняет время начала и конца фраз в соответствии с тем к какой части аудио относится эта транскрипция)
 
+# Master Node API
+
+## POST /transcribe
+
+Начать транскрибирование аудио файла.
+
+**Параметры запроса:**
+- `file_id` (integer) - ID файла в базе данных
+- `url` (string) - URL аудио файла для скачивания
+- `max_duration` (integer, по умолчанию 60) - максимальная длительность каждого фрагмента в секундах
+- `model_size` (string, по умолчанию "small") - размер Whisper модели: tiny, base, small, medium, large
+- `format` (string, по умолчанию "json") - формат вывода: json, srt, vtt, txt
+
+**Пример запроса:**
+```json
+{
+  "file_id": 555,
+  "url": "http://file-storage-service:3001/api/files/audio_short.mp3",
+  "max_duration": 60,
+  "model_size": "small",
+  "format": "json"
+}
+```
+
+**Пример ответа:**
+```json
+{
+  "task_id": "768de42f-b6e4-44d5-adc8-5b87df64675c",
+  "status": "started"
+}
+```
+
+## GET /status/{task_id}
+
+Получить статус задачи транскрибирования.
+
+**Пример ответа при успехе:**
+```json
+{
+  "task_id": "768de42f-b6e4-44d5-adc8-5b87df64675c",
+  "status": "completed"
+}
+```
+
+Возможные статусы:
+- `pending` - задача создана, ожидает обработки
+- `splitting` - аудио разбивается на части
+- `processing` - идет транскрибирование
+- `completed` - транскрибирование завершено успешно
+- `error` - произошла ошибка при обработке
+
 
 # Audio Splitter Service
 
