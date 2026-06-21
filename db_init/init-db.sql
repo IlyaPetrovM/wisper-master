@@ -148,6 +148,8 @@ CREATE TABLE IF NOT EXISTS `transcription_parts` (
   `file_path` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
   `file_url` text COLLATE utf8mb4_unicode_ci,
   `correlation_id` varchar(100) COLLATE utf8mb4_unicode_ci NOT NULL UNIQUE,
+  `duration_msec` int(11) DEFAULT 0 COMMENT 'длительность фрагмента в миллисекундах',
+  `offset_ms` int(11) DEFAULT 0 COMMENT 'смещение начала фрагмента в исходном файле (сумма длительности предыдущих частей)',
   `status` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT 'pending' COMMENT 'pending, processing, completed, error',
   `transcript` longtext COLLATE utf8mb4_unicode_ci,
   `error_message` text COLLATE utf8mb4_unicode_ci,

@@ -104,21 +104,21 @@ class Database:
 
     @staticmethod
     def create_transcription_part(task_id: str, part_index: int, file_path: str,
-                                  file_url: str, correlation_id: str):
+                                  file_url: str, correlation_id: str, duration_msec: int = 0, offset_ms: int = 0):
         try:
             db = pymysql.connect(**DB_CONFIG)
             cursor = db.cursor()
 
             insert_sql = """
                 INSERT INTO transcription_parts
-                (task_id, part_index, file_path, file_url, correlation_id, status)
-                VALUES (%s, %s, %s, %s, %s, 'pending')
+                (task_id, part_index, file_path, file_url, correlation_id, duration_msec, offset_ms, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending')
             """
-            cursor.execute(insert_sql, (task_id, part_index, file_path, file_url, correlation_id))
+            cursor.execute(insert_sql, (task_id, part_index, file_path, file_url, correlation_id, duration_msec, offset_ms))
             db.commit()
             cursor.close()
             db.close()
-            logger.info(f"Created transcription part {correlation_id}")
+            logger.info(f"Created transcription part {correlation_id} (offset: {offset_ms}ms, duration: {duration_msec}ms)")
         except Exception as e:
             logger.error(f"Error creating transcription part: {e}")
 
@@ -167,7 +167,7 @@ class Database:
             cursor = db.cursor()
 
             cursor.execute("""
-                SELECT part_index, file_path, file_url, correlation_id, status, transcript
+                SELECT part_index, file_path, file_url, correlation_id, status, transcript, duration_msec, offset_ms
                 FROM transcription_parts
                 WHERE task_id = %s
                 ORDER BY part_index
@@ -185,7 +185,9 @@ class Database:
                         "file_url": r[2],
                         "correlation_id": r[3],
                         "status": r[4],
-                        "transcript": r[5]
+                        "transcript": r[5],
+                        "duration_msec": r[6],
+                        "offset_ms": r[7]
                     }
                     for r in results
                 ]
@@ -232,7 +234,7 @@ class Database:
             cursor = db.cursor()
 
             cursor.execute("""
-                SELECT task_id, part_index, file_path, file_url, status, transcript
+                SELECT task_id, part_index, file_path, file_url, status, transcript, duration_msec, offset_ms
                 FROM transcription_parts
                 WHERE correlation_id = %s
             """, (correlation_id,))
@@ -248,7 +250,9 @@ class Database:
                     "file_path": result[2],
                     "file_url": result[3],
                     "status": result[4],
-                    "transcript": result[5]
+                    "transcript": result[5],
+                    "duration_msec": result[6],
+                    "offset_ms": result[7]
                 }
             return None
         except Exception as e:

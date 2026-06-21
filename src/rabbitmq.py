@@ -143,37 +143,44 @@ class RabbitMQConnection:
         try:
             response = json.loads(body)
             task_id = response.get("task_id")
+            status = response.get("status")
 
             task_info = Database.get_task_info(task_id)
             if not task_info:
                 logger.warning(f"Unknown task {task_id}")
                 return
 
-            if response.get("success"):
-                files = response.get("storage_files", [])
+            if status == "success":
+                # Support both storage_files (uploaded) and files (local storage) formats
+                files = response.get("storage_files") or response.get("files", [])
                 splitted_file_id = str(uuid.uuid4())
 
                 logger.info(f"Split response for task {task_id}: {len(files)} files received")
 
+                offset_ms = 0
                 for idx, file_info in enumerate(files):
                     file_path = file_info.get("path")
-                    file_url = f"http://file-storage-service:3001/api/files/{file_path}"
+                    file_url = f"http://file-storage-service:3001/api/files/{file_path}" if response.get("storage_files") else file_path
                     correlation_id = f"{task_id}_{idx}"
-                    offset_ms = idx * 60 * 1000
+                    duration_msec = file_info.get("duration_msec", 0)
 
                     Database.create_transcription_part(
-                        task_id, idx, file_path, file_url, correlation_id
+                        task_id, idx, file_path, file_url, correlation_id, duration_msec, offset_ms
                     )
-                    logger.info(f"  Saved part {idx}: {file_path} (correlation_id: {correlation_id}, offset: {offset_ms}ms)")
+                    logger.info(f"  Saved part {idx}: {file_path} (correlation_id: {correlation_id}, offset: {offset_ms}ms, duration: {duration_msec}ms)")
 
                     self.publish_transcribe_task(task_id, file_url, idx)
+                    offset_ms += duration_msec
 
                 Database.update_split_task(task_id, splitted_file_id, "splitting")
                 logger.info(f"Task {task_id} split and transcription tasks queued")
-            else:
+            elif status == "error":
                 error_msg = response.get("error", "Unknown error")
                 Database.update_task_status(task_id, "error", error_msg)
                 logger.error(f"Split failed for {task_id}: {error_msg}")
+            else:
+                logger.warning(f"Unknown status '{status}' for task {task_id}")
+                Database.update_task_status(task_id, "error", f"Unknown split response status: {status}")
         except Exception as e:
             logger.error(f"Error handling split response: {e}")
             if task_id:
@@ -182,9 +189,10 @@ class RabbitMQConnection:
     def _handle_transcription_response(self, ch, method, properties, body):
         try:
             response = json.loads(body)
+            task_id = response.get("task_id")
             correlation_id = response.get("correlation_id")
             status = response.get("status")
-            logger.info(f"Transcription response received: correlation_id={correlation_id}, status={status}")
+            logger.info(f"Transcription response received: task_id={task_id}, correlation_id={correlation_id}, status={status}")
             logger.debug(f"Full response: {json.dumps(response, ensure_ascii=False)}")
 
             part_info = Database.get_part_by_correlation_id(correlation_id)
@@ -192,8 +200,11 @@ class RabbitMQConnection:
                 logger.warning(f"Unknown part {correlation_id}")
                 return
 
-            task_id = part_info["task_id"]
             part_index = part_info["part_index"]
+            # Verify task_id matches (safety check)
+            if part_info["task_id"] != task_id:
+                logger.error(f"Task ID mismatch for correlation_id {correlation_id}: expected {part_info['task_id']}, got {task_id}")
+                return
             file_url = response.get("file_url", "unknown")
             status = response.get("status", "unknown")
 
@@ -249,9 +260,14 @@ class RabbitMQConnection:
                 return
 
             file_id = task_info["file_id"]
-            offset_ms = part_index * 60 * 1000
 
-            logger.debug(f"Parsing transcript for task {task_id} part {part_index}, data length: {len(transcript_data)}")
+            # Get offset from task parts (offset = sum of all previous parts' durations)
+            parts = Database.get_task_parts(task_id)
+            offset_ms = 0
+            if parts and part_index < len(parts):
+                offset_ms = parts[part_index].get("offset_ms", 0)
+
+            logger.debug(f"Parsing transcript for task {task_id} part {part_index}, data length: {len(transcript_data)}, offset: {offset_ms}ms")
             subtitles = self._parse_transcript_json(transcript_data)
             logger.info(f"Parsed {len(subtitles)} segments from transcript (task {task_id} part {part_index})")
 
