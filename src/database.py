@@ -18,21 +18,21 @@ DB_CONFIG = {
 
 class Database:
     @staticmethod
-    def create_task(file_id: str, url: str, task_id: str, model_size: str = "small", format: str = "json"):
+    def create_task(file_id: str, url: str, task_id: str, model_size: str = "small", format: str = "json", min_mark_duration_ms: int = 60000):
         try:
             db = pymysql.connect(**DB_CONFIG)
             cursor = db.cursor()
 
             insert_sql = """
-                INSERT INTO transcribtion_tasks (task_id, file_id, url, model_size, format, status, created_at)
-                VALUES (%s, %s, %s, %s, %s, 'pending', NOW())
+                INSERT INTO transcribtion_tasks (task_id, file_id, url, model_size, format, min_mark_duration_ms, status, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, 'pending', NOW())
             """
 
-            cursor.execute(insert_sql, (task_id, file_id, url, model_size, format))
+            cursor.execute(insert_sql, (task_id, file_id, url, model_size, format, min_mark_duration_ms))
             db.commit()
             cursor.close()
             db.close()
-            logger.info(f"Created task {task_id} (model_size: {model_size}, format: {format})")
+            logger.info(f"Created task {task_id} (model_size: {model_size}, format: {format}, min_mark_duration_ms: {min_mark_duration_ms})")
         except Exception as e:
             logger.error(f"Error creating task: {e}")
             raise
@@ -317,7 +317,7 @@ class Database:
             cursor = db.cursor()
 
             cursor.execute("""
-                SELECT task_id, file_id, url, status, model_size, format
+                SELECT task_id, file_id, url, status, model_size, format, min_mark_duration_ms
                 FROM transcribtion_tasks
                 WHERE task_id = %s
             """, (task_id,))
@@ -333,7 +333,8 @@ class Database:
                     "url": result[2],
                     "status": result[3],
                     "model_size": result[4],
-                    "format": result[5]
+                    "format": result[5],
+                    "min_mark_duration_ms": result[6] if result[6] else 60000
                 }
             return None
         except Exception as e:

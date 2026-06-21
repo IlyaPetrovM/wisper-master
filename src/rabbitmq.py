@@ -289,6 +289,7 @@ class RabbitMQConnection:
                 return
 
             file_id = task_info["file_id"]
+            min_mark_duration_ms = task_info.get("min_mark_duration_ms", 60000)
 
             # Get offset from task parts (offset = sum of all previous parts' durations)
             parts = Database.get_task_parts(task_id)
@@ -304,22 +305,27 @@ class RabbitMQConnection:
                 logger.warning(f"No segments parsed from transcript for task {task_id} part {part_index}")
                 return
 
+            # Group segments by min_mark_duration_ms
+            grouped_subtitles = self._group_segments_by_duration(subtitles, min_mark_duration_ms)
+            logger.info(f"Grouped {len(subtitles)} segments into {len(grouped_subtitles)} marks")
+
             db = pymysql.connect(**DB_CONFIG)
             cursor = db.cursor()
 
             inserted_count = 0
             updated_count = 0
 
-            for subtitle in subtitles:
-                start_ms = subtitle["start_ms"] + offset_ms
+            for group in grouped_subtitles:
+                start_ms = group["start_ms"] + offset_ms
                 start_time = self._format_time(start_ms)
+                text = group["text"]
 
-                check_sql = "SELECT describtion, hide FROM marks WHERE file_id = %s AND time_msec = %s"
+                check_sql = "SELECT id, hide FROM marks WHERE file_id = %s AND time_msec = %s"
                 cursor.execute(check_sql, (file_id, start_ms))
                 result = cursor.fetchone()
 
                 if result:
-                    describtion, hide = result[0], result[1]
+                    hide = result[1]
                     # Если запись скрыта (hide не пусто), то добавляем новую вместо обновления
                     if hide is not None and str(hide) == '1':
                         insert_sql = """
@@ -328,7 +334,7 @@ class RabbitMQConnection:
                         """
                         cursor.execute(
                             insert_sql,
-                            (file_id, start_ms, start_time, subtitle["text"]),
+                            (file_id, start_ms, start_time, text),
                         )
                         inserted_count += 1
                         logger.debug(f"Added new record for file_id={file_id}, time_msec={start_ms} - existing record is hidden")
@@ -343,7 +349,7 @@ class RabbitMQConnection:
                     """
                     cursor.execute(
                         insert_sql,
-                        (file_id, start_ms, start_time, subtitle["text"]),
+                        (file_id, start_ms, start_time, text),
                     )
                     inserted_count += 1
 
@@ -379,6 +385,83 @@ class RabbitMQConnection:
             logger.error(f"Error checking task completion: {e}")
 
 
+    def _group_segments_by_duration(self, segments: List[Dict], min_duration_ms: int) -> List[Dict]:
+        """Groups segments so that each group has duration >= min_duration_ms.
+
+        The last incomplete group is merged with the previous group.
+
+        Args:
+            segments: List of segments with start_ms, end_ms and text
+            min_duration_ms: Minimum duration for each group
+
+        Returns:
+            List of grouped segments with combined text
+        """
+        if not segments:
+            return []
+
+        logger.info(f"Grouping {len(segments)} segments with min_duration_ms={min_duration_ms}")
+
+        # Calculate duration for each segment
+        segments_with_duration = []
+        for seg in segments:
+            duration_ms = seg.get("end_ms", seg["start_ms"]) - seg["start_ms"]
+            if duration_ms < 0:
+                duration_ms = 0
+
+            segments_with_duration.append({
+                "start_ms": seg["start_ms"],
+                "text": seg["text"],
+                "duration_ms": duration_ms
+            })
+            logger.debug(f"  Segment: start={seg['start_ms']}ms, end={seg.get('end_ms', seg['start_ms'])}ms, duration={duration_ms}ms, text='{seg['text'][:50]}'")
+
+        # Group segments by minimum duration
+        groups = []
+        current_group = []
+        current_duration = 0
+
+        for seg in segments_with_duration:
+            current_group.append(seg)
+            current_duration += seg["duration_ms"]
+
+            if current_duration >= min_duration_ms:
+                # Create a group
+                group_text = " ".join([s["text"] for s in current_group])
+                groups.append({
+                    "start_ms": current_group[0]["start_ms"],
+                    "text": group_text,
+                    "duration_ms": current_duration
+                })
+                logger.debug(f"Created group: start={current_group[0]['start_ms']}ms, duration={current_duration}ms, text_length={len(group_text)}")
+                current_group = []
+                current_duration = 0
+
+        # Handle remainder
+        if current_group:
+            remainder_text = " ".join([s["text"] for s in current_group])
+            remainder_duration = sum([s["duration_ms"] for s in current_group])
+
+            if groups:
+                # Merge remainder with last group
+                groups[-1]["text"] += " " + remainder_text
+                groups[-1]["duration_ms"] += remainder_duration
+                logger.debug(f"Merged remainder ({remainder_duration}ms) with last group. New duration: {groups[-1]['duration_ms']}ms")
+            else:
+                # Only remainder exists, create single group
+                groups.append({
+                    "start_ms": current_group[0]["start_ms"],
+                    "text": remainder_text,
+                    "duration_ms": remainder_duration
+                })
+                logger.debug(f"Created single group from remainder: start={current_group[0]['start_ms']}ms, duration={remainder_duration}ms")
+
+        logger.info(f"Grouping complete: {len(segments)} segments → {len(groups)} groups")
+        for i, g in enumerate(groups):
+            logger.info(f"  Group {i}: start={g['start_ms']}ms, duration={g['duration_ms']}ms, text='{g['text'][:80]}'")
+
+        return groups
+
     def _parse_transcript_json(self, json_data: str) -> List[Dict]:
         """Парсит транскрипт в JSON формате от whisper-service
 
@@ -397,20 +480,22 @@ class RabbitMQConnection:
                 for segment in data:
                     if isinstance(segment, dict):
                         start_ms = int(float(segment.get("start", 0)) * 1000)
+                        end_ms = int(float(segment.get("end", 0)) * 1000)
                         text = segment.get("text", "").strip()
 
                         if text:
-                            subtitles.append({"start_ms": start_ms, "text": text})
+                            subtitles.append({"start_ms": start_ms, "end_ms": end_ms, "text": text})
 
             # Если это объект с полями segments
             elif isinstance(data, dict):
                 if "segments" in data:
                     for segment in data["segments"]:
                         start_ms = int(float(segment.get("start", 0)) * 1000)
+                        end_ms = int(float(segment.get("end", 0)) * 1000)
                         text = segment.get("text", "").strip()
 
                         if text:
-                            subtitles.append({"start_ms": start_ms, "text": text})
+                            subtitles.append({"start_ms": start_ms, "end_ms": end_ms, "text": text})
 
                 # Если есть просто поле text (полная транскрипция)
                 elif "text" in data:

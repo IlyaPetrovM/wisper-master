@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS `transcribtion_tasks` (
   `url` text COLLATE utf8mb4_unicode_ci NOT NULL,
   `splitted_file_id` varchar(36) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `format` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT 'json' COMMENT 'output format: json, srt, vtt, txt',
+  `min_mark_duration_ms` int(11) DEFAULT 60000 COMMENT 'minimum duration in ms for grouping transcription segments into marks',
   `error_message` text COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   PRIMARY KEY (`task_id`),
   KEY `idx_file_id` (`file_id`),

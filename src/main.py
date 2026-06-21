@@ -43,7 +43,7 @@ def startup_event():
 def start_transcription(request: TranscribeRequest):
     try:
         task_id = str(uuid.uuid4())
-        Database.create_task(request.file_id, request.url, task_id, request.model_size, request.format)
+        Database.create_task(request.file_id, request.url, task_id, request.model_size, request.format, request.min_mark_duration_ms)
         rmq.publish_split_task(task_id, request.url, request.max_duration)
         return {"task_id": task_id, "status": "started"}
     except Exception as e:
