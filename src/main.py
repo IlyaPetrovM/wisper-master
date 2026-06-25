@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI, HTTPException
 
 from database import Database
-from models import TranscribeRequest
+from models import TranscribeRequest, LoadModelRequest
 from rabbitmq import RabbitMQConnection
 import uuid
 
@@ -48,6 +48,16 @@ def start_transcription(request: TranscribeRequest):
         return {"task_id": task_id, "status": "started"}
     except Exception as e:
         logger.error(f"Error starting transcription: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/load_model")
+def load_model(request: LoadModelRequest):
+    try:
+        rmq.publish_load_model(request.model_size)
+        return {"status": "model_load_queued", "model_size": request.model_size}
+    except Exception as e:
+        logger.error(f"Error queuing model load: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

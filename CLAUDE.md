@@ -19,6 +19,7 @@ This is the **Master Node** service for a distributed audio transcription system
 
 - **[src/main.py](src/main.py)**: FastAPI application with REST endpoints
   - `POST /transcribe`: Start a new transcription task
+  - `POST /load_model`: Queue model loading on whisper workers
   - `GET /status/{task_id}`: Poll task status
   - `GET /health`: Health check endpoint
   - Recovers incomplete tasks on startup

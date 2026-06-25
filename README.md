@@ -19,6 +19,28 @@
 
 # Master Node API
 
+## POST /load_model
+
+Загрузить Whisper модель на рабочих узлах.
+
+**Параметры запроса:**
+- `model_size` (string) - размер модели: tiny, base, small, medium, large
+
+**Пример запроса:**
+```json
+{
+  "model_size": "small"
+}
+```
+
+**Пример ответа:**
+```json
+{
+  "status": "model_load_queued",
+  "model_size": "small"
+}
+```
+
 ## POST /transcribe
 
 Начать транскрибирование аудио файла.

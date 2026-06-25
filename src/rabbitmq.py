@@ -92,6 +92,18 @@ class RabbitMQConnection:
         self.wisper_tasks_pending[task_id] += 1
         logger.info(f"Queued transcribe task for {file_url} (model_size: {model_size}, format: {format})")
 
+    def publish_load_model(self, model_size: str):
+        correlation_id = f"model-load-{uuid.uuid4()}"
+        task_id = f"load_model-{uuid.uuid4()}"
+        message = {
+            "command": "load_model",
+            "model_size": model_size,
+            "correlation_id": correlation_id,
+            "task_id": task_id,
+        }
+        self.publish_queue.put(("wisper_in", message))
+        logger.info(f"Queued load_model task for model_size: {model_size}")
+
     def delete_file_from_storage(self, file_id: str):
         try:
             url = f"http://file-storage-service:3001/api/files/{file_id}"
