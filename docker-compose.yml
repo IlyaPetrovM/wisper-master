@@ -3,7 +3,7 @@ services:
     build:
       context: .
     container_name: master-wisper
-    image: master-wisper:0.1.0
+    image: master-wisper:0.1.1
     depends_on:
       rabbitmq:
         condition: service_healthy
