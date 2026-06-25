@@ -7,6 +7,8 @@ import threading
 import uuid
 import time
 from typing import Dict, List
+from urllib.request import Request, urlopen
+from urllib.error import URLError
 
 import pika
 import pymysql
@@ -89,6 +91,36 @@ class RabbitMQConnection:
             self.wisper_tasks_pending[task_id] = 0
         self.wisper_tasks_pending[task_id] += 1
         logger.info(f"Queued transcribe task for {file_url} (model_size: {model_size}, format: {format})")
+
+    def publish_load_model(self, model_size: str):
+        correlation_id = f"model-load-{uuid.uuid4()}"
+        task_id = f"load_model-{uuid.uuid4()}"
+        message = {
+            "command": "load_model",
+            "model_size": model_size,
+            "correlation_id": correlation_id,
+            "task_id": task_id,
+        }
+        self.publish_queue.put(("wisper_in", message))
+        logger.info(f"Queued load_model task for model_size: {model_size}")
+
+    def delete_file_from_storage(self, file_id: str):
+        try:
+            url = f"http://file-storage-service:3001/api/files/{file_id}"
+            request = Request(url, method="DELETE")
+            with urlopen(request, timeout=10) as response:
+                if response.status == 200:
+                    logger.info(f"Successfully deleted file {file_id} from storage")
+                    return True
+                else:
+                    logger.warning(f"Unexpected status code {response.status} when deleting file {file_id}")
+                    return False
+        except URLError as e:
+            logger.error(f"Failed to delete file {file_id} from storage: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Error deleting file {file_id} from storage: {e}", exc_info=True)
+            return False
 
     def start_consuming(self):
         self.channel.basic_consume(
@@ -271,6 +303,12 @@ class RabbitMQConnection:
 
                     Database.update_part_status(correlation_id, "completed", transcript=transcript, worker_id=worker_id, filename=filename, file_id=file_id)
                     self._save_transcription_to_marks(task_id, part_index, transcript)
+
+                # Delete split file from storage after successful transcription
+                part_file_path = part_info.get("file_path")
+                if part_file_path:
+                    self.delete_file_from_storage(part_file_path)
+                    logger.info(f"Queued deletion of split file {part_file_path} for task {task_id} part {part_index}")
             else:
                 logger.warning(f"Unknown status for task {task_id} part {part_index}: {status}")
                 worker_id = response.get("worker_id", "unknown")

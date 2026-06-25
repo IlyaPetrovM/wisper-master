@@ -13,6 +13,10 @@ class TranscribeRequest(BaseModel):
     min_mark_duration_ms: int = 60000
 
 
+class LoadModelRequest(BaseModel):
+    model_size: str
+
+
 @dataclass
 class TaskState:
     task_id: str

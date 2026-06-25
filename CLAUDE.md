@@ -19,6 +19,7 @@ This is the **Master Node** service for a distributed audio transcription system
 
 - **[src/main.py](src/main.py)**: FastAPI application with REST endpoints
   - `POST /transcribe`: Start a new transcription task
+  - `POST /load_model`: Queue model loading on whisper workers
   - `GET /status/{task_id}`: Poll task status
   - `GET /health`: Health check endpoint
   - Recovers incomplete tasks on startup
@@ -33,6 +34,7 @@ This is the **Master Node** service for a distributed audio transcription system
   - Two consumer threads: one for split responses, one for transcription results
   - One publisher thread for async message publishing from internal queue
   - Handles task state transitions based on message responses
+  - Deletes split audio files from file-storage-service after successful transcription
 
 - **[src/models.py](src/models.py)**: Pydantic request/response models
 
@@ -48,11 +50,16 @@ This is the **Master Node** service for a distributed audio transcription system
 - Worker returns: JSON segments with start (sec), end (sec), text, or error message
 - Master converts start/end times to milliseconds and adds offset_ms from the part
 
+**File Cleanup (after transcription success):**
+- Master sends: DELETE `/api/files/{file_id}` request to file-storage-service for each completed transcription part
+- Removes split audio files from storage after successful processing
+- Response (200): `{"message": "File deleted successfully", "id": "file_id"}`
+
 **Task State Transitions:**
 ```
 pending → splitting (after split queued)
        → transcribing (after all transcription messages published)
-       → completed (when all parts succeed)
+       → completed (when all parts succeed and cleanup performed)
        → error (if any part fails or splitting fails)
 ```
 
