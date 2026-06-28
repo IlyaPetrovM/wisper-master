@@ -8,7 +8,7 @@ class TranscribeRequest(BaseModel):
     file_id: int
     url: str
     max_duration: int = 60
-    model_size: str = "small"
+    model_size: str = "bzikst/faster-whisper-large-v3-russian-int8"
     format: str = "json"
     min_mark_duration_ms: int = 60000
 

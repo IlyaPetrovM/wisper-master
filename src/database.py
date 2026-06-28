@@ -18,7 +18,7 @@ DB_CONFIG = {
 
 class Database:
     @staticmethod
-    def create_task(file_id: str, url: str, task_id: str, model_size: str = "small", format: str = "json", min_mark_duration_ms: int = 60000):
+    def create_task(file_id: str, url: str, task_id: str, model_size: str = "bzikst/faster-whisper-large-v3-russian-int8", format: str = "json", min_mark_duration_ms: int = 60000):
         try:
             db = pymysql.connect(**DB_CONFIG)
             cursor = db.cursor()

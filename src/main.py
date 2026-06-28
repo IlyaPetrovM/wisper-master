@@ -27,7 +27,7 @@ def startup_event():
         logger.info(f"Recovering task {task_id}")
 
         full_task_info = Database.get_task_info(task_id)
-        model_size = full_task_info.get("model_size", "small") if full_task_info else "small"
+        model_size = full_task_info.get("model_size", "bzikst/faster-whisper-large-v3-russian-int8") if full_task_info else "bzikst/faster-whisper-large-v3-russian-int8"
         format_type = full_task_info.get("format", "json") if full_task_info else "json"
 
         parts = Database.get_task_parts(task_id)

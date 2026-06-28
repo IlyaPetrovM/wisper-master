@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS `transcribtion_tasks` (
   `status` varchar(20) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'pending',
   `created_at` timestamp NULL DEFAULT current_timestamp(),
   `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
-  `model_size` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT 'small' COMMENT 'whisper model size: tiny, base, small, medium, large',
+  `model_size` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT 'bzikst/faster-whisper-large-v3-russian-int8' COMMENT 'whisper model size: tiny, base, small, medium, large or custom model path',
   `url` text COLLATE utf8mb4_unicode_ci NOT NULL,
   `splitted_file_id` varchar(36) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `format` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT 'json' COMMENT 'output format: json, srt, vtt, txt',

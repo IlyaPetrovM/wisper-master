@@ -24,6 +24,8 @@ RABBITMQ_CONFIG = {
     "password": os.getenv("RABBITMQ_PASSWORD", "guest"),
 }
 
+FILE_STORAGE_SERVICE_URL = os.getenv("FILE_STORAGE_SERVICE_URL", "http://file-storage-service:3001")
+
 QUEUE_SPLIT_IN = "split_in"
 QUEUE_SPLIT_OUT = "split_out"
 QUEUE_WISPER_IN = "wisper_in"
@@ -106,7 +108,7 @@ class RabbitMQConnection:
 
     def delete_file_from_storage(self, file_id: str):
         try:
-            url = f"http://file-storage-service:3001/api/files/{file_id}"
+            url = f"{FILE_STORAGE_SERVICE_URL}/api/files/{file_id}"
             request = Request(url, method="DELETE")
             with urlopen(request, timeout=10) as response:
                 if response.status == 200:
@@ -214,7 +216,7 @@ class RabbitMQConnection:
                 format_type = task_info.get("format", "json")
                 for idx, file_info in enumerate(files):
                     file_path = file_info.get("path")
-                    file_url = f"http://file-storage-service:3001/api/files/{file_path}" if response.get("storage_files") else file_path
+                    file_url = f"{FILE_STORAGE_SERVICE_URL}/api/files/{file_path}" if response.get("storage_files") else file_path
                     correlation_id = f"{task_id}_{idx}"
                     duration_msec = file_info.get("duration_msec", 0)
 

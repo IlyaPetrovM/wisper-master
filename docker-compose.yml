@@ -21,6 +21,7 @@ services:
       MARIADB_USER: mediarch_user
       MARIADB_PASSWORD: mediarch_password
       MARIADB_DATABASE: mediarch
+      FILE_STORAGE_SERVICE_URL: http://file-storage-service:3001
     volumes:
       - ./storage/master:/app/storage
     ports:
