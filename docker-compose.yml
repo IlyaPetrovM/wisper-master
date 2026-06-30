@@ -3,7 +3,7 @@ services:
     build:
       context: .
     container_name: master-wisper
-    image: master-wisper:0.1.1
+    image: master-wisper:0.2.0
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -21,7 +21,7 @@ services:
       MARIADB_USER: mediarch_user
       MARIADB_PASSWORD: mediarch_password
       MARIADB_DATABASE: mediarch
-      FILE_STORAGE_SERVICE_URL: http://file-storage-service:3001
+      FILE_STORAGE_SERVICE_URL: http://file-storage-service.lan:3001
     volumes:
       - ./storage/master:/app/storage
     ports:
@@ -38,7 +38,7 @@ services:
       MYSQL_USER: mediarch_user
       MYSQL_PASSWORD: mediarch_password
     ports:
-      - "3307:3306"
+      - "3306:3306"
     volumes:
       - ./storage/mariadb:/var/lib/mysql
       - ./db_init/init-db.sql:/docker-entrypoint-initdb.d/init.sql
@@ -84,7 +84,7 @@ services:
     networks:
       - rabbit-network
   audio-splitter:
-    image: audio-splitter-service:0.3.1
+    image: audio-splitter-service:0.4.0
     container_name: audio-splitter
     volumes:
       - ./storage/splitter:/shared_storage
@@ -99,9 +99,9 @@ services:
       RABBITMQ_PASSWORD: guest
     networks:
       - rabbit-network
-  whisper-service-Hugo:
-    image: whisper-service:0.2.0
-    container_name: whisper-worker-Hugo
+  whisper-service:
+    image: whisper-service:0.2.1-gpu
+    container_name: wisper-worker-CUDA
     ports:
       - "8001:8000"
     volumes:
@@ -118,30 +118,7 @@ services:
       - QUEUE_IN=wisper_in
       - QUEUE_OUT=wisper_out
       # Имя воркера
-      - WORKER_NAME=Hugo
-    restart: unless-stopped
-    networks:
-      - rabbit-network
-  whisper-service-Bobby:
-    image: whisper-service:0.2.0
-    container_name: whisper-worker-Bobby
-    ports:
-      - "8002:8000"
-    volumes:
-      - ./storage/wisper/models:/app/models
-    environment:
-      - PYTHONUNBUFFERED=1
-      # RabbitMQ конфигурация
-      - RABBIT_HOST=rabbitmq
-      - RABBIT_PORT=5672
-      - RABBIT_USER=guest
-      - RABBIT_PASSWORD=guest
-      - RABBIT_HEARTBEAT=600
-      # Названия очередей
-      - QUEUE_IN=wisper_in
-      - QUEUE_OUT=wisper_out
-      # Имя воркера
-      - WORKER_NAME=Bobby
+      - WORKER_NAME=wisper-worker-CUDA
     restart: unless-stopped
     networks:
       - rabbit-network

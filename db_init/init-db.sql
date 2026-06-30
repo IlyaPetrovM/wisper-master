@@ -139,12 +139,18 @@ CREATE TABLE IF NOT EXISTS `transcribtion_tasks` (
   `splitted_file_id` varchar(36) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `format` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT 'json' COMMENT 'output format: json, srt, vtt, txt',
   `min_mark_duration_ms` int(11) DEFAULT 60000 COMMENT 'minimum duration in ms for grouping transcription segments into marks',
+  `max_duration` int(11) DEFAULT 60 COMMENT 'max chunk duration in seconds passed to the splitter; needed to re-publish split on recovery',
   `error_message` text COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   PRIMARY KEY (`task_id`),
   KEY `idx_file_id` (`file_id`),
   KEY `idx_status` (`status`),
   CONSTRAINT `fk_transcribtion_file` FOREIGN KEY (`file_id`) REFERENCES `files` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Ensure max_duration exists on databases created before this column was added.
+ALTER TABLE `transcribtion_tasks`
+  ADD COLUMN IF NOT EXISTS `max_duration` int(11) DEFAULT 60
+  COMMENT 'max chunk duration in seconds passed to the splitter; needed to re-publish split on recovery';
 
 CREATE TABLE IF NOT EXISTS `transcription_parts` (
   `filename` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,

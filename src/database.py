@@ -18,21 +18,21 @@ DB_CONFIG = {
 
 class Database:
     @staticmethod
-    def create_task(file_id: str, url: str, task_id: str, model_size: str = "bzikst/faster-whisper-large-v3-russian-int8", format: str = "json", min_mark_duration_ms: int = 60000):
+    def create_task(file_id: str, url: str, task_id: str, model_size: str = "bzikst/faster-whisper-large-v3-russian-int8", format: str = "json", min_mark_duration_ms: int = 60000, max_duration: int = 60):
         try:
             db = pymysql.connect(**DB_CONFIG)
             cursor = db.cursor()
 
             insert_sql = """
-                INSERT INTO transcribtion_tasks (task_id, file_id, url, model_size, format, min_mark_duration_ms, status, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, 'pending', NOW())
+                INSERT INTO transcribtion_tasks (task_id, file_id, url, model_size, format, min_mark_duration_ms, max_duration, status, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', NOW())
             """
 
-            cursor.execute(insert_sql, (task_id, file_id, url, model_size, format, min_mark_duration_ms))
+            cursor.execute(insert_sql, (task_id, file_id, url, model_size, format, min_mark_duration_ms, max_duration))
             db.commit()
             cursor.close()
             db.close()
-            logger.info(f"Created task {task_id} (model_size: {model_size}, format: {format}, min_mark_duration_ms: {min_mark_duration_ms})")
+            logger.info(f"Created task {task_id} (model_size: {model_size}, format: {format}, min_mark_duration_ms: {min_mark_duration_ms}, max_duration: {max_duration})")
         except Exception as e:
             logger.error(f"Error creating task: {e}")
             raise
@@ -253,9 +253,11 @@ class Database:
             cursor = db.cursor()
 
             cursor.execute("""
-                SELECT task_id, file_id, url
+                SELECT task_id, file_id, url, status,
+                       COALESCE(max_duration, 60) AS max_duration,
+                       TIMESTAMPDIFF(SECOND, created_at, NOW()) AS age_seconds
                 FROM transcribtion_tasks
-                WHERE status NOT IN ('completed', 'error')
+                WHERE status NOT IN ('completed', 'error', 'failed')
                 ORDER BY created_at
             """)
 
@@ -268,7 +270,10 @@ class Database:
                     {
                         "task_id": r[0],
                         "file_id": r[1],
-                        "url": r[2]
+                        "url": r[2],
+                        "status": r[3],
+                        "max_duration": r[4],
+                        "age_seconds": r[5] if r[5] is not None else 0
                     }
                     for r in results
                 ]
